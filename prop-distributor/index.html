@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>道具分布 · 关卡编辑视窗</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <h1>道具分布 · 关卡编辑视窗</h1>
+  <label>场景 <select id="sceneSel"></select></label>
+  <label>地形种子 <input id="terrainSeed" type="number" value="1"></label>
+  <label>布局种子 <input id="layoutSeed" type="number" value="1"></label>
+  <span id="modeWrap">
+    模式：
+    <label><input type="radio" name="mode" value="lock" checked> 锁住路标</label>
+    <label><input type="radio" name="mode" value="reseed"> 只固定地形种子</label>
+  </span>
+  <button id="runBtn" class="primary">生成分布</button>
+  <button id="replayBtn">回放采样过程</button>
+  <button id="reproBtn">复现校验</button>
+</header>
+<main>
+  <aside id="controls">
+    <h3>密度倍率</h3>
+    <div id="densities"></div>
+    <button id="boostBtn">窄路高密度情景 ×1.8</button>
+    <div id="cartPanel">
+      <h3>推车净空</h3>
+      <label>车宽(m) <input id="cartWidth" type="number" value="1.7" step="0.1" min="0.5" max="3"></label>
+      <label>安全余量(m) <input id="safety" type="number" value="0.25" step="0.05" min="0" max="1"></label>
+      <button id="cartBtn" class="primary">推车通行</button>
+      <button id="compareBtn">对比策略（挪动 vs 重采样）</button>
+      <div id="strategy"></div>
+    </div>
+    <h3>显示</h3>
+    <label><input id="showSources" type="checkbox"> 显示采样来源点</label>
+    <label><input id="showCorridor" type="checkbox" checked> 显示净空走廊</label>
+    <div class="note">
+      操作：拖拽旋转视角，滚轮缩放，点击路标查看关联实例。<br>
+      Shift+点击地面：手动放置"热图类型"下拉所选的道具（同样受声明约束过滤）。<br>
+      绿点=接受的候选来源位置，红点=被几何过滤拒绝的候选。
+    </div>
+  </aside>
+  <section id="viewport">
+    <canvas id="view3d"></canvas>
+    <div id="signpostInfo" class="hidden"></div>
+  </section>
+  <aside id="results">
+    <h3>约束热图 / 采样过程</h3>
+    <canvas id="heatmap" width="300" height="300"></canvas>
+    <div class="row">
+      <button data-layer="constraint">约束层</button>
+      <button data-layer="density">密度层</button>
+      <select id="heatType">
+        <option value="tree">树</option>
+        <option value="rock">岩石</option>
+        <option value="bush" selected>灌木</option>
+        <option value="decor">装饰</option>
+      </select>
+    </div>
+    <div class="legend">
+      <span class="lg free"></span>可放置 <span class="lg spacing"></span>间距排斥
+      <span class="lg slope"></span>坡度 <span class="lg mat"></span>材质
+      <span class="lg corr"></span>走廊
+    </div>
+    <div id="warnings"></div>
+    <h3>统计核验</h3>
+    <div id="stats"></div>
+    <canvas id="nnhist" width="300" height="70"></canvas>
+    <h3>净空报告</h3>
+    <div id="clearance"></div>
+  </aside>
+</main>
+<footer><div id="log"></div></footer>
+<script type="module" src="src/app.mjs"></script>
+</body>
+</html>
