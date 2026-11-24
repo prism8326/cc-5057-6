@@ -1,7 +1,12 @@
 import { getScene, SCENE_DEFS } from './terrain.mjs';
 import { TYPES, TYPE_ORDER } from './types.mjs';
 import { sampleScene, withObb, geoRejectReason, makeGeoCtx } from './sampler.mjs';
-import { createStore, ensureSignposts, lockedFromSignposts } from './identity.mjs';
+import { createStore, ensureSignposts, lockedFromSignposts, loadSignposts, STORE_VERSION } from './identity.mjs';
+import { getSurfaces } from './surface.mjs';
+import {
+  serializeDistribution, validateDistributionAsset, makeInstanceRecord,
+  assetToRenderInstances, assetOverlaps, DISTRIBUTION_FORMAT_VERSION,
+} from './distribution.mjs';
 import { analyzeCorridor, relocateBlockers, resampleAvoidingCorridor } from './clearance.mjs';
 import { verifySpacing, overlapViolations, clarkEvans, chiSquareUniform, nnHistogram, layoutHash } from './stats.mjs';
 import { makeCamera, renderWorld, clearMeshCache, screenToGround } from './render3d.mjs';
@@ -15,7 +20,7 @@ const store = createStore(window.localStorage);
 
 const state = {
   sceneId: 'road', scene: null,
-  run: null, signRec: null, signposts: [],
+  run: null, asset: null, signRec: null, signposts: [],
   cam: makeCamera(),
   cart: null, cartMargins: null,
   highlight: new Set(),
@@ -25,6 +30,7 @@ const state = {
   lastPick: [],
   showSources: false,
   compare: {},
+  status: null,
 };
 
 function densityScaleFromUI() {
@@ -109,7 +115,11 @@ function switchScene() {
   $('signpostInfo').classList.add('hidden');
   $('modeWrap').style.display = state.scene.road ? '' : 'none';
   $('cartPanel').style.display = state.scene.road ? '' : 'none';
-  state.signRec = store.get('signposts:' + state.sceneId);
+  const loaded = loadSignposts(store, state.sceneId, { scene: state.scene, surfaces: getSurfaces(state.scene) });
+  state.signRec = loaded.record;
+  if (loaded.migrated) {
+    log(`实例存储换版：路标记录 v${loaded.fromVersion} → v${STORE_VERSION} 已迁移（键 signposts:v${STORE_VERSION}:${state.sceneId}）`);
+  }
   regenerate();
 }
 
@@ -126,26 +136,65 @@ function regenerate() {
     log('只固定地形种子模式：不锁定任何实例，布局可完全重排以填满可用区域');
   }
 
-  state.run = sampleScene({ scene, layoutSeed, densityScale, locked });
+  const run = sampleScene({ scene, layoutSeed, densityScale, locked });
   state.cart = null; state.compare = {}; state.highlight = new Set();
 
-  if (scene.road) {
-    const trees = state.run.instances.filter(i => i.type === 'tree' && !i.locked);
-    if (!state.signRec && trees.length) {
-      state.signRec = ensureSignposts(store, scene.id, trees, (t) => distToPolyline(t.x, t.z, scene.road.pts));
-      log(`已为 ${state.signRec.list.length} 棵靠近道路的树挂上路标并保存稳定身份`);
+  if (scene.road && !state.signRec) {
+    const trees = run.instances.filter(i => i.type === 'tree' && !i.locked);
+    if (trees.length) {
+      state.signRec = ensureSignposts(store, scene.id, trees, (t) => distToPolyline(t.x, t.z, scene.road.pts), 3,
+        { scene, surfaces: getSurfaces(scene) });
+      log(`已为 ${state.signRec.list.length} 棵靠近道路的树挂上路标并保存稳定身份（存储 v${STORE_VERSION}）`);
     }
+  }
+
+  state.asset = serializeDistribution({
+    scene, layoutSeed, terrainSeed: Number($('terrainSeed').value), densityScale, run,
+    signposts: state.signRec, sceneId: scene.id,
+  });
+
+  if (scene.road) {
     state.signposts = (state.signRec?.list || []).map(e => ({
-      signpostId: e.signpostId, tree: e.tree,
-      x: e.tree.x + 1.1, z: e.tree.z + 0.4,
+      signpostId: e.signpostId, instanceId: e.instanceId,
+      world: e.world, x: e.world.x + 1.1, z: e.world.z + 0.4,
     }));
     if (mode() === 'lock') explainGaps();
   } else {
     state.signposts = [];
   }
 
+  syncAssetToRun(run);
   reportAll();
-  log(`生成完成：${state.run.instances.length} 个实例（布局种子 ${layoutSeed}，地形种子 ${$('terrainSeed').value}）`);
+  log(`生成完成：${state.asset.instances.length} 个实例（分布资产 v${DISTRIBUTION_FORMAT_VERSION}，存储 v${STORE_VERSION}，布局种子 ${layoutSeed}，地形种子 ${$('terrainSeed').value}）`);
+}
+
+// Derive the render/editor view of instances from the current asset and carry the
+// sampler accounting/events along so stats and replay still work.
+function syncAssetToRun(run) {
+  const instances = assetToRenderInstances(state.asset);
+  state.run = {
+    instances,
+    accounting: run ? run.accounting : (state.run?.accounting ?? { types: {}, policy: {}, warnings: [] }),
+    events: run ? run.events : (state.run?.events ?? []),
+  };
+  state.status = distributionStatus();
+}
+
+// Live validation of the current distribution asset, surfaced in the UI.
+function distributionStatus() {
+  const check = validateDistributionAsset(state.asset, { scene: state.scene });
+  const overlaps = assetOverlaps(state.asset);
+  const ids = new Set(state.asset.instances.map(i => i.instanceId));
+  return {
+    formatVersion: state.asset.formatVersion,
+    storeVersion: STORE_VERSION,
+    surfaceVersion: state.scene.surfaceVersion,
+    count: state.asset.instances.length,
+    uniqueIdentity: ids.size === state.asset.instances.length,
+    overlaps,
+    validation: check,
+    assetOk: check.ok && ids.size === state.asset.instances.length && overlaps === 0,
+  };
 }
 
 // Explainable density gaps around locked trees.
@@ -158,12 +207,12 @@ function explainGaps() {
       if (!scene.contains(x, z)) continue;
       total += cell * cell;
       for (const L of state.signRec.list) {
-        if (Math.hypot(L.tree.x - x, L.tree.z - z) < 2.0 + 0.9) { gapArea += cell * cell; break; }
+        if (Math.hypot(L.world.x - x, L.world.z - z) < 2.0 + 0.9) { gapArea += cell * cell; break; }
       }
     }
   }
   log(`可解释密度缺口：${state.signRec.list.length} 棵锁定树的排斥区约 ${gapArea.toFixed(0)} m²（占可用 ${(100 * gapArea / total).toFixed(1)}%），` +
-      `位置：${state.signRec.list.map(e => `(${e.tree.x.toFixed(0)},${e.tree.z.toFixed(0)})`).join(' ')}`);
+      `位置：${state.signRec.list.map(e => `(${e.world.x.toFixed(0)},${e.world.z.toFixed(0)})`).join(' ')}`);
 }
 
 function reportAll() {
@@ -171,7 +220,19 @@ function reportAll() {
   const { accounting, instances } = state.run;
   for (const w of accounting.warnings) warn(w);
 
-  // spacing & overlap verification on actual oriented footprints
+  // Distribution asset status: what the editor and render layer are actually reading.
+  const st = state.status || distributionStatus();
+  const statusHtml =
+    `分布资产 <b>v${st.formatVersion}</b> · 实例存储 <b>v${st.storeVersion}</b> · 表面 <b>v${st.surfaceVersion}</b><br>` +
+    `实例 ${st.count} 个，身份唯一 <b class="${st.uniqueIdentity ? 'ok' : 'bad'}">${st.uniqueIdentity ? '是' : '否'}</b>` +
+    `，锚点校验 <b class="${st.validation.ok ? 'ok' : 'bad'}">${st.validation.ok ? 'PASS' : 'FAIL'}</b>` +
+    `，重叠 <b class="${st.overlaps === 0 ? 'ok' : 'bad'}">${st.overlaps}</b>`;
+  $('distStatus').innerHTML = statusHtml;
+  if (!st.uniqueIdentity) warn('分布资产存在重复 instanceId：身份保留失败');
+  if (!st.validation.ok) warn(`分布资产锚点校验失败 ${st.validation.problems.length} 处：${st.validation.problems[0]?.problem || ''}`);
+  if (st.overlaps > 0) warn(`分布资产重叠 ${st.overlaps} 处`);
+
+  // spacing & overlap verification on actual oriented footprints (from migrated asset)
   const sp = verifySpacing(instances);
   const ov = overlapViolations(instances);
   if (sp.violations > 0) warn(`间距违规 ${sp.violations} 处：${sp.details[0] || ''}`);
@@ -380,19 +441,42 @@ function compareStrategies() {
       <td><button id="applyRes">应用</button></td></tr></table>
     <div class="note">处理前最小净空 ${c0.minMargin.toFixed(2)}m，阻挡 ${c0.blockers.length} 个。挪动策略不缩小任何道具尺寸。</div>`;
   $('applyRel').onclick = () => {
-    state.run.instances = rel.instances;
+    rebuildAssetFromRender(rel.instances, { accounting: state.run.accounting, events: state.run.events });
     state.highlight = new Set();
     log(`已应用"挪动"策略：移动 ${rel.moved}，删除 ${rel.deleted}，保留比例 ${fmt(rel.retainedRatio)}，净空 ${rel.clearance.minMargin.toFixed(2)}m`);
     reportAll();
   };
   $('applyRes').onclick = () => {
-    state.run = { instances: res.instances, accounting: res.accounting, events: res.events };
+    rebuildAssetFromRender(res.instances, { accounting: res.accounting, events: res.events });
     state.highlight = new Set();
     log(`已应用"重采样"策略：保留比例 ${fmt(res.retainedRatio)}，净空 ${res.clearance.minMargin.toFixed(2)}m`);
     if (res.clearance.minMargin < 0) warn('重采样后净空仍不足：密度与净空在该区域不可同时满足，受限范围见净空报告');
     reportAll();
   };
   log(`策略对比完成：挪动保留 ${fmt(rel.retainedRatio)}（净空 ${rel.clearance.minMargin.toFixed(2)}m） vs 重采样保留 ${fmt(res.retainedRatio)}（净空 ${res.clearance.minMargin.toFixed(2)}m）`);
+}
+
+// Rebuild the current distribution asset from a render-instance list (e.g. after a
+// clearance strategy changed the layout). Identity is preserved by instanceId.
+function rebuildAssetFromRender(instances, { accounting, events } = {}) {
+  const byId = new Map(state.asset.instances.map(a => [a.instanceId, a]));
+  const records = instances.map((inst) => {
+    const id = inst.instanceId || inst.id;
+    const existing = byId.get(id);
+    const rec = makeInstanceRecord({
+      scene: state.scene, instanceId: id, type: inst.type,
+      x: inst.x, z: inst.z, yaw: inst.yaw, scale: inst.scale, mirrored: !!inst.mirrored,
+      locked: !!inst.locked, manualOverride: existing?.manualOverride ?? !!inst.manualOverride,
+      signpostId: inst.signpostId || existing?.signpostId,
+    });
+    return rec;
+  });
+  state.asset = {
+    ...state.asset,
+    instances: records,
+    manualOverrides: records.filter(r => r.manualOverride).map(r => r.instanceId),
+  };
+  syncAssetToRun(accounting ? { accounting, events } : undefined);
 }
 
 // camera + picking
@@ -447,8 +531,20 @@ function manualPlace(e) {
     log(`手动放置 ${TYPES[type].label} @(${g[0].toFixed(1)},${g[1].toFixed(1)}) 被拒绝：${reason}`);
     return;
   }
-  state.run.instances.push(cand);
-  log(`手动放置 ${TYPES[type].label} @(${g[0].toFixed(1)},${g[1].toFixed(1)})，朝向 ${(cand.yaw * 180 / Math.PI).toFixed(0)}°`);
+  // Write the manual placement into the distribution asset as a v2 record with an
+  // explicit manualOverride, then re-derive render instances from the asset.
+  const instanceId = cand.id;
+  const rec = makeInstanceRecord({
+    scene: state.scene, instanceId, type, x: g[0], z: g[1],
+    yaw: cand.yaw, scale: cand.scale, manualOverride: true,
+  });
+  state.asset = {
+    ...state.asset,
+    instances: [...state.asset.instances, rec],
+    manualOverrides: [...state.asset.manualOverrides, instanceId],
+  };
+  syncAssetToRun();
+  log(`手动放置 ${TYPES[type].label} @(${g[0].toFixed(1)},${g[1].toFixed(1)})，朝向 ${(cand.yaw * 180 / Math.PI).toFixed(0)}°，已写入分布资产（人工覆盖）`);
   reportAll();
 }
 
@@ -464,12 +560,14 @@ function pickSignpost(e) {
   if (!best) { info.classList.add('hidden'); state.selectedSignpost = null; draw(); return; }
   state.selectedSignpost = best.id;
   const rec = state.signRec.list.find(x => x.signpostId === best.id);
-  const inst = state.run.instances.find(i => i.id === rec.tree.id || i.signpostId === best.id);
+  const inst = state.run.instances.find(i => i.instanceId === rec.instanceId || i.signpostId === best.id);
   info.classList.remove('hidden');
   info.innerHTML = `<b>路标 ${best.id}</b><br>` +
-    `关联实例：<code>${rec.tree.id}</code>（树）<br>` +
-    `位置 (${rec.tree.x.toFixed(1)}, ${rec.tree.z.toFixed(1)})，朝向 ${(rec.tree.yaw * 180 / Math.PI).toFixed(0)}°，尺寸 ×${rec.tree.scale.toFixed(2)}<br>` +
-    `身份来源：首次生成时挂牌并持久保存，重采种子后身份不变。<br>` +
+    `关联实例：<code>${rec.instanceId}</code>（树）<br>` +
+    `位置 (${rec.world.x.toFixed(1)}, ${rec.world.z.toFixed(1)})，朝向 ${(rec.yaw * 180 / Math.PI).toFixed(0)}°，尺寸 ×${rec.scale.toFixed(2)}` +
+    (rec.mirrored ? '（镜像）' : '') + `<br>` +
+    `表面锚点：${rec.surfaceAnchor.surfaceId} (u=${rec.surfaceAnchor.u}, v=${rec.surfaceAnchor.v})<br>` +
+    `身份来源：首次生成时挂牌并持久保存（实例存储 v${STORE_VERSION}），重采种子后身份不变。<br>` +
     (inst ? `当前状态：<span class="ok">在场${inst.locked ? '（已锁定）' : ''}</span>` :
       `当前状态：<span class="bad">不在场</span>（只固定地形种子模式下实例可重排；切回"锁住路标"可恢复在场）`);
   draw();
@@ -484,3 +582,6 @@ window.addEventListener('resize', resize);
 
 init();
 resize();
+
+// Exposed for headless verification (smoke test) only.
+export const __state = state;

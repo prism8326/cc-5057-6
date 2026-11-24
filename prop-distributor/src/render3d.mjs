@@ -173,12 +173,15 @@ function emitMesh(out, cam, W, H, mesh, color, xf, alpha = 1) {
 }
 
 function instTransform(inst, groundY) {
-  const c = Math.cos(inst.yaw), s = Math.sin(inst.yaw), k = inst.scale;
+  const c = Math.cos(inst.yaw), s = Math.sin(inst.yaw), k = Math.abs(inst.scale);
   const y0 = groundY;
+  // Mirroring reflects local X (equivalent to a negative X scale) without letting a
+  // negative scale leak into footprint/clearance math.
+  const mx = inst.mirrored ? -1 : 1;
   return (p) => [
-    inst.x + k * (c * p[0] + s * p[2]),
+    inst.x + k * (c * (mx * p[0]) + s * p[2]),
     y0 + k * p[1],
-    inst.z + k * (-s * p[0] + c * p[2]),
+    inst.z + k * (-s * (mx * p[0]) + c * p[2]),
   ];
 }
 

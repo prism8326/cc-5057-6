@@ -68,11 +68,30 @@ globalThis.requestAnimationFrame = () => {};
 globalThis.devicePixelRatio = 1;
 
 test('UI boots: init + generate + full render pipeline runs headless', async () => {
-  await import('../src/app.mjs');
+  const app = await import('../src/app.mjs');
   const log = registry.get('log');
   assert.ok(log.children.length > 0, 'log should have entries after boot');
+
+  // The viewport/editor reads a migrated v2 distribution asset, not raw sampler output.
+  const status = registry.get('distStatus');
+  assert.ok(status.innerHTML.includes('分布资产'), 'distribution status panel filled');
+  assert.ok(status.innerHTML.includes('实例存储'), 'storage version shown');
+  assert.ok(status.innerHTML.includes('表面'), 'surface version shown');
+
   const stats = registry.get('stats');
   assert.ok(stats.innerHTML.includes('声明间距'), 'stats panel should contain spacing table');
   const clearance = registry.get('clearance');
-  assert.ok(clearance.innerHTML.includes('走廊') || clearance.includes('净空'), 'clearance panel filled');
+  assert.ok(clearance.innerHTML.includes('净空') || clearance.innerHTML.includes('走廊'), 'clearance panel filled');
+
+  const state = app.__state;
+  assert.ok(state, 'app exposes state for verification');
+  assert.equal(state.asset.formatVersion, 2, 'editor reads a v2 asset');
+  assert.equal(state.run.instances.length, state.asset.instances.length);
+  // Render instances carry migrated world coordinates identical to the asset.
+  for (let i = 0; i < state.asset.instances.length; i++) {
+    assert.equal(state.run.instances[i].x, state.asset.instances[i].world.x);
+    assert.equal(state.run.instances[i].z, state.asset.instances[i].world.z);
+  }
+  assert.equal(state.status.uniqueIdentity, true, 'identity unique');
+  assert.equal(state.status.validation.ok, true, 'anchors validate');
 });

@@ -8,8 +8,11 @@ const MAX_EVENTS = 6000;
 
 export function withObb(inst) {
   const t = TYPES[inst.type];
-  const hx = t.hx * inst.scale, hz = t.hz * inst.scale;
-  return { ...inst, obb: obbFrom(inst.x, inst.z, inst.yaw, hx, hz), hx, hz };
+  // A mirrored instance uses a positive scale; mirroring reflects the rendered mesh
+  // only. The centered footprint is identical either way, so the OBB is unchanged.
+  const scale = Math.abs(inst.scale);
+  const hx = t.hx * scale, hz = t.hz * scale;
+  return { ...inst, scale, obb: obbFrom(inst.x, inst.z, inst.yaw, hx, hz), hx, hz };
 }
 
 // Geometry filter for one candidate against context. Returns null if OK, else reason string.
@@ -127,7 +130,7 @@ export function sampleScene(opts) {
   // Locked instances (e.g. signposted trees) are injected as fixed constraints.
   const grid = new Grid(6);
   for (const L of opts.locked || []) {
-    const inst = withObb({ ...L, locked: true });
+    const inst = withObb({ ...L, locked: true, instanceId: L.instanceId || L.id });
     instances.push(inst);
     grid.add(inst);
   }
@@ -159,6 +162,7 @@ export function sampleScene(opts) {
         return false;
       }
       cand.id = `${scene.id}-${type}-${instances.length}`;
+      cand.instanceId = cand.id;
       instances.push(cand);
       grid.add(cand);
       acc.phaseB.accepted++;

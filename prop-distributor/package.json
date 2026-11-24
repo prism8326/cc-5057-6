@@ -5,6 +5,9 @@
   "description": "Procedural prop distribution level-editor viewport (density field + slope + material regions, declared spacing, clearance analysis)",
   "scripts": {
     "start": "node server.mjs",
-    "test": "node --test test/*.test.mjs"
+    "test": "node --test test/*.test.mjs",
+    "dist:sample": "node tools/distribution.mjs sample",
+    "dist:migrate": "node tools/distribution.mjs migrate",
+    "dist:verify": "node tools/distribution.mjs verify"
   }
 }
